@@ -11,11 +11,9 @@ import win32file
 import win32con
 import os
 import pywintypes
-import datetime
 import matplotlib.pyplot as plt
 import mysql.connector
-from datetime import datetime
-from sqlalchemy import create_engine, Integer, DATE, DECIMAL, VARCHAR, CHAR
+from sqlalchemy import create_engine, Integer, DATE, DECIMAL, VARCHAR, CHAR, MetaData, Table, Column
 
 # used database name
 db_name = 'WHO_COVID19_DATASET'
@@ -36,6 +34,7 @@ engine.execute(f"CREATE DATABASE IF NOT EXISTS {db_name}")
 WHO_LATEST_OUTPUT_FILE = 'latest.csv'
 WHO_DAILY_REPORT_TABLE_OUTPUT_FILE = 'dailyReport.csv'
 WHO_VACCINATION_OUTPUT_FILE = 'vaccination.csv'
+
 # local path
 PATH_ = 'E:/PY/'
 RES_FILE_PATH = f"{PATH_}program/testforDV/data"
@@ -47,6 +46,7 @@ GEOJSON_FILE_PATH = f"{RES_FILE_PATH}/json/WB_countries_Admin0_lowres.geojson"
 WHO_LATEST_LOCAL_PATH = f"{PATH_}{WHO_LATEST_OUTPUT_FILE}"
 WHO_DAILY_REPORT_TABLE_PATH = f"{PATH_}{WHO_DAILY_REPORT_TABLE_OUTPUT_FILE}"
 WHO_VACCINATION_PATH = f"{PATH_}{WHO_VACCINATION_OUTPUT_FILE}"
+
 # url
 URL_WHO_LATEST = 'https://covid19.who.int/WHO-COVID-19-global-table-data.csv'
 URL_WHO_DAILY_REPORT = 'https://covid19.who.int/WHO-COVID-19-global-data.csv'
@@ -122,14 +122,14 @@ def data_update_time_setting(latestFile=WHO_LATEST_DATA, dailyReportFile=WHO_DAI
     win32file.CloseHandle(handle_file_daily_report)
     win32file.CloseHandle(handle_file_vaccination)
 
-    handle_file_time_latest = datetime.datetime.fromtimestamp(
+    handle_file_time_latest = datetime.fromtimestamp(
         pywintypes.Time(handle_file_time_latest).timestamp())
-    handle_file_time_daily_report = datetime.datetime.fromtimestamp(
+    handle_file_time_daily_report = datetime.fromtimestamp(
         pywintypes.Time(handle_file_time_daily_report).timestamp())
-    handle_file_time_vaccination = datetime.datetime.fromtimestamp(
+    handle_file_time_vaccination = datetime.fromtimestamp(
         pywintypes.Time(handle_file_time_vaccination).timestamp())
-    now_time = datetime.datetime.fromtimestamp(
-        pywintypes.Time(datetime.datetime.now()).timestamp())
+    now_time = datetime.fromtimestamp(
+        pywintypes.Time(datetime.now()).timestamp())
     diff_latest = now_time - handle_file_time_latest
     diff_daily_report = now_time - handle_file_time_daily_report
     diff_vaccination = now_time - handle_file_time_vaccination
@@ -194,74 +194,141 @@ def save_csv_file(output_file, func, url):
 #         print(data_reader.loc[data_reader.isnull().any(axis=1)])
 
 
-def update_mysql_table(dataFile):
-    # Check if the table exists and has data
-    insp = inspect(engine)
-    table_exists = dataFile[3] in insp.get_table_names()
-    table_has_data = False
-    if table_exists:
-        table_has_data = bool(engine.execute(
-            f"SELECT EXISTS(SELECT 1 FROM {dataFile[3]} LIMIT 1)").scalar())
+def create_mysql_table(dataFile):
+    field_types = zip(dataFile[4], dataFile[5])
 
-    # Create table if it doesn't exist or has no data
-    if not table_exists or not table_has_data:
-         # Read CSV data
+    # according to position you want insert to, you need to change position of ','
+    # primary_key = ', ID INT AUTO_INCREMENT PRIMARY KEY'
+    ENGINE = 'InnoDB'
+    CHARSET = 'utf8mb4'
+
+    # table_schema = ','.join(['{} {}'.format(col_name, col_data_type)
+    #                                        for col_name, col_data_type in field_types]) + primary_key
+    # sql_creat_table = f"CREATE TABLE {dataFile[3]} ({table_schema}) ENGINE={ENGINE} DEFAULT CHARSET={CHARSET};"
+    # connection.execute(f"DROP TABLE IF EXISTS {dataFile[3]}")
+    # connection.execute(sql_creat_table)
+
+    metadata = MetaData(bind=engine)
+    Table(dataFile[3],
+          metadata,
+          *[
+        Column(col_name, col_data_type, nullable=False)
+        for col_name, col_data_type in field_types
+    ],
+        #   Column('ID', Integer, primary_key=True, autoincrement=True),
+        mysql_engine=ENGINE,
+        mysql_charset=CHARSET
+    )
+    metadata.create_all(engine)
+    print(f"{dataFile[3]} created successfully.")
+
+
+def import_data_to_table(dataFile):
+    table_has_data = False
+    table_has_data = bool(engine.execute(
+        f"SELECT EXISTS(SELECT 1 FROM {dataFile[3]} LIMIT 1)").scalar())
+    if not table_has_data:
+        # Read CSV data
         data_reader = pd.read_csv(
             dataFile[1], quotechar='"', delimiter=',', header=0)
         data_reader.fillna(value='NULL', inplace=True)
         data_reader.columns = map(str.lower, data_reader.columns)
 
-        field_types = dict(zip(dataFile[4], dataFile[5]))
-        table_schema = ','.join(['{} {}'.format(col_name, col_data_type)
-                                 for col_name, col_data_type in field_types])
-        with engine.begin() as connection:
-            connection.execute(f"DROP TABLE IF EXISTS {dataFile[3]}")
-            connection.execute(f"CREATE TABLE {dataFile[3]} ({table_schema})")
-            data_reader.to_sql(
-                name=dataFile[3], con=connection, if_exists='replace', index=False)
-        print("Table created successfully.")
-        return
-
-    # Get latest date from the table
-    with engine.begin() as connection:
-        latest_date_str = connection.execute(
-            f"SELECT MAX({dataFile[4][0]}) FROM {dataFile[3]}").scalar()
-    latest_date = datetime.strptime(latest_date_str, '%Y-%m-%d')
-
-    # Compare latest date with current date
-    days_diff = (datetime.today() - latest_date).days
-
-    # Update table if latest data is older than 7 days
-    if days_diff >= 7:
-        field_types = dict(zip(dataFile[4], dataFile[5]))
-        with engine.begin() as connection:
-            data_reader.to_sql(
-                name=dataFile[3], con=connection, if_exists='append', index=False)
-        print("Data updated successfully.")
+        data_reader.to_sql(
+            name=dataFile[3], con=engine, if_exists='replace', index=True)
+        # engine.execute(
+        #     f"ALTER TABLE {dataFile[3]} ADD {primary_key} FIRST;")
+        print(f"Data in {dataFile[3]} created successfully.")
     else:
-        print("Data is up to date. Don't need to do anything.")
+        print("Initializated database.")
 
 
-def update_data_file(latestFile=WHO_LATEST_DATA, dailyReportFile=WHO_DAILY_REPORT_DATA, vaccinationFile=WHO_VACCINATION_DATA):
+def init_mysql_table(dataFile):
+    # Check if the table exists and has data
+    insp = inspect(engine)
+    table_exists = dataFile[3] in insp.get_table_names()
+
+    # Create table if it doesn't exist or has no data
+    if not table_exists:
+        create_mysql_table(dataFile)
+        import_data_to_table(dataFile)
+        return True
+    else:
+        import_data_to_table(dataFile)
+        return False
+
+
+def update_mysql_table(dataFile):
+    if not init_mysql_table(dataFile):
+        # Get latest date from the table
+        with engine.begin() as connection:
+            latest_date_str = connection.execute(
+                f"SELECT MAX({dataFile[4][0]}) FROM {dataFile[3]}").scalar()
+        latest_date = datetime.strptime(latest_date_str, '%Y-%m-%d')
+        # Compare latest date with current date
+        days_diff = (datetime.today() - latest_date).days
+
+        # Update table if latest data is older than 7 days
+        if dataFile[3] == 'who_covid_19_daily_report_data_table':
+            if days_diff >= 7:
+                data_reader = pd.read_csv(
+                    dataFile[1], quotechar='"', delimiter=',', header=0)
+                data_reader.fillna(value='NULL', inplace=True)
+                data_reader.columns = map(str.lower, data_reader.columns)
+
+                data_reader['date_reported'] = pd.to_datetime(
+                    data_reader['date_reported'])
+                updated_data = data_reader[
+                    data_reader['date_reported'] > latest_date]
+
+                if updated_data.empty:
+                    print(
+                        f"Data in {dataFile[3]} is up to date. Don't need to do anything.")
+                    return
+                with engine.begin() as connection:
+                    updated_data.to_sql(
+                        name=dataFile[3], con=connection, if_exists='append', index=True)
+                print(f"Data in {dataFile[3]} updated successfully.")
+            else:
+                print(
+                    f"Data in {dataFile[3]} is up to date. Don't need to do anything.")
+        else:
+            if days_diff >= 1:
+                data_reader = pd.read_csv(
+                    dataFile[1], quotechar='"', delimiter=',', header=0)
+                data_reader.fillna(value='NULL', inplace=True)
+                data_reader.columns = map(str.lower, data_reader.columns)
+
+                # because that latest and vaccination is not lot of data and frequently updated
+                with engine.begin() as connection:
+                    updated_data.to_sql(
+                        name=dataFile[3], con=connection, if_exists='replace', index=True)
+                print(f"Data in {dataFile[3]} updated successfully.")
+            else:
+                print(
+                    f"Data in {dataFile[3]} is up to date. Don't need to do anything.")
+
+
+def update_who_data_file(latestFile=WHO_LATEST_DATA, dailyReportFile=WHO_DAILY_REPORT_DATA, vaccinationFile=WHO_VACCINATION_DATA):
     latest_file_path = os.path.join(latestFile[1])
     daly_report_file_path = os.path.join(dailyReportFile[1])
     vaccination_file_path = os.path.join(vaccinationFile[1])
     if os.path.isfile(latest_file_path) and os.path.isfile(daly_report_file_path) and os.path.isfile(vaccination_file_path):
         diff_latest, diff_daily_report, diff_vaccination = data_update_time_setting()
-        if diff_latest > datetime.timedelta(hours=18):
+        if diff_latest > timedelta(hours=180):
             print('latest:', diff_latest)
             save_csv_file(latestFile[2], get_WHO_data, url=latestFile[0])
-
-        elif diff_vaccination > datetime.timedelta(hours=18):
+            update_mysql_table(update_mysql_table)
+        elif diff_vaccination > timedelta(hours=18):
             print('vaccination:', diff_vaccination)
             save_csv_file(vaccinationFile[2],
                           get_WHO_data, url=vaccinationFile[0])
-
-        elif diff_daily_report > datetime.timedelta(days=4):
+            update_mysql_table(vaccinationFile)
+        elif diff_daily_report > timedelta(days=4):
             print('daily report:', diff_daily_report)
             save_csv_file(dailyReportFile[2], get_WHO_data,
                           url=dailyReportFile[0])
-
+            update_mysql_table(dailyReportFile)
         else:
             print('latest:', diff_latest)
             print('daily report:', diff_daily_report)
@@ -269,10 +336,13 @@ def update_data_file(latestFile=WHO_LATEST_DATA, dailyReportFile=WHO_DAILY_REPOR
 
     else:
         save_csv_file(latestFile[2], get_WHO_data, url=latestFile[0])
+        update_mysql_table(update_mysql_table)
         save_csv_file(dailyReportFile[2], get_WHO_data,
                       url=dailyReportFile[0])
+        update_mysql_table(dailyReportFile)
         save_csv_file(vaccinationFile[2],
                       get_WHO_data, url=vaccinationFile[0])
+        update_mysql_table(vaccinationFile)
 
 
 def df_gdf_merged_data(data_latest, data_vaccination, data_geojson):
@@ -285,8 +355,10 @@ def df_gdf_merged_data(data_latest, data_vaccination, data_geojson):
 
 
 if __name__ == '__main__':
-    # latestFile=WHO_LATEST_DATA, dailyReportFile=WHO_DAILY_REPORT_DATA, vaccinationFile=WHO_VACCINATION_DATA)
-    update_mysql_table(WHO_DAILY_REPORT_DATA)
+    latestFile = WHO_LATEST_DATA
+    dailyReportFile = WHO_DAILY_REPORT_DATA
+    vaccinationFile = WHO_VACCINATION_DATA
+    update_who_data_file(latestFile, dailyReportFile, vaccinationFile)
 
 # close connection
 # cnx.close()
