@@ -1,5 +1,4 @@
 from datetime import datetime, timedelta
-from sqlalchemy import create_engine, inspect
 import plotly.express as px
 import gzip
 from urllib import request, error
@@ -7,28 +6,33 @@ import http
 import csv
 import pandas as pd
 import geopandas as gpd
+from shapely import wkt
 import win32file
 import win32con
 import os
 import pywintypes
 import matplotlib.pyplot as plt
 import mysql.connector
-from sqlalchemy import create_engine, Integer, DATE, DECIMAL, VARCHAR, CHAR, MetaData, Table, Column
-
+from sqlalchemy import create_engine, MetaData, inspect, text, Integer, DATE, DECIMAL, VARCHAR, CHAR, MetaData, Table, Column
 # used database name
-db_name = 'WHO_COVID19_DATASET'
-# connect to mysql database
+db_name = ['WHO_COVID19_DATASET',
+           'WORLD_BANK_COUNTRIES_ADMIN0_lOWERS_GEOJSON_DATASET']
 
-# cnx = mysql.connector.connect(user='root', password='HM&&S.914-1',
-#                               host='localhost')
-engine = create_engine(
-    f"mysql+mysqlconnector://root:HM&&S.914-1@localhost/{db_name}")
-
+ENGINE = 'InnoDB'
+CHARSET = 'utf8mb4'
 # Connect to the database using sqlalchemy
 engine = create_engine(
-    f"mysql+mysqlconnector://root:HM&&S.914-1@localhost/{db_name}")
+    f"mysql+mysqlconnector://root:HM&&S.914-1@localhost/{db_name[0]}", echo=False)
+geo_engine = create_engine(
+    f"mysql+mysqlconnector://root:HM&&S.914-1@localhost/{db_name[1]}", echo=False)
+# test the database connection
+conn = engine.connect()
+insp = inspect(conn)
 
-engine.execute(f"CREATE DATABASE IF NOT EXISTS {db_name}")
+for database_name in db_name:
+    if database_name.lower() not in insp.get_schema_names():
+        conn.execute(text(
+            f"CREATE DATABASE {database_name} DEFAULT CHARACTER SET utf8mb4"))
 
 # res files
 WHO_LATEST_OUTPUT_FILE = 'latest.csv'
@@ -41,6 +45,7 @@ RES_FILE_PATH = f"{PATH_}program/testforDV/data"
 
 # geojson
 GEOJSON_FILE_PATH = f"{RES_FILE_PATH}/json/WB_countries_Admin0_lowres.geojson"
+
 
 # covid-19 data
 WHO_LATEST_LOCAL_PATH = f"{PATH_}{WHO_LATEST_OUTPUT_FILE}"
@@ -56,7 +61,7 @@ URL_WHO_VACCINATION = 'https://covid19.who.int/who-data/vaccination-data.csv'
 WHO_LATEST_DATA_MYSQL_TABLE = 'who_covid_19_latest_data_table'
 WHO_DAILY_REPORT_DATA_MYSQL_TABLE = 'who_covid_19_daily_report_data_table'
 WHO_VACCINATION_DATA_MYSQL_TABLE = 'who_covid_19_vaccination_data_table'
-
+WB_GEOJSON_DATA_TABLE = 'wb_countries_geojson_data_table'
 # data field name and field types
 WHO_LATEST_DATA_FIELD_NAME = ['Name', 'WHO_region', 'Cases - cumulative total', 'Cases - cumulative total per 100000 population', 'Cases - newly reported in last 7 days',
                               'Cases - newly reported in last 7 days per 100000 population', 'Cases - newly reported in last 24 hours', 'Deaths - cumulative total',
@@ -73,11 +78,15 @@ WHO_DAILY_REPORT_DATA_FIELD_TYPE = [
     DATE(), CHAR(2), VARCHAR(64), CHAR(4), Integer(), Integer(), Integer(), Integer()]
 
 WHO_VACCINATION_DATA_FIELD_NAME = ['COUNTRY', 'ISO3', 'WHO_REGION', 'DATA_SOURCE', 'DATE_UPDATED', 'TOTAL_VACCINATIONS', 'PERSONS_VACCINATED_1PLUS_DOSE', 'TOTAL_VACCINATIONS_PER100',
-                                   'PERSONS_VACCINATED_1PLUS_DOSE_PER100', 'PERSONS_FULLY_VACCINATED', 'PERSONS_FULLY_VACCINATED_PER100', 'PERSONS_FULLY_VACCINATED_PER100',
+                                   'PERSONS_VACCINATED_1PLUS_DOSE_PER100', 'PERSONS_FULLY_VACCINATED', 'PERSONS_FULLY_VACCINATED_PER100', 'VACCINES_USED',
                                    'FIRST_VACCINE_DATE', 'NUMBER_VACCINES_TYPES_USED', 'PERSONS_BOOSTER_ADD_DOSE', 'PERSONS_BOOSTER_ADD_DOSE_PER100']
 WHO_VACCINATION_DATA_FIELD_TYPE = [VARCHAR(64), CHAR(3), CHAR(4), VARCHAR(16), DATE(), Integer(), DECIMAL(), Integer(), DECIMAL(), Integer(), DECIMAL(), VARCHAR(64),
                                    DATE(), Integer(), Integer(), DECIMAL()]
 
+WB_GEOJSON_DATA_FIELD_NAME = ['FID', 'OBJECTID', 'FORMAL_EN', 'ISO_A2', 'ISO_A3', 'WB_A2', 'WB_A3', 'CONTINENT', 'REGION_UN', 'SUBREGION', 'REGION_WB', 'NAME_DE', 'NAME_EN', 'WB_NAME',
+                              'WB_REGION', 'Shape_Leng', 'Shape_Area', 'geometry']
+WB_GEOJSON_DATA_FIELD_TYPE = ['INT', 'INT', 'VARCHAR(64)', 'CHAR(3)', 'CHAR(4)', 'CHAR(3)', 'CHAR(4)', 'VARCHAR(64)', 'VARCHAR(64)',
+                              'VARCHAR(64)', 'VARCHAR(64)', 'VARCHAR(64)', 'VARCHAR(64)', 'VARCHAR(64)', 'VARCHAR(16)', 'DOUBLE', 'DOUBLE', 'GEOMETRY']
 # data tuple (url, local_path, output_file, mysql_table, field_name, field_mysql_type)
 WHO_LATEST_DATA = (URL_WHO_LATEST, WHO_LATEST_LOCAL_PATH,
                    WHO_LATEST_OUTPUT_FILE, WHO_LATEST_DATA_MYSQL_TABLE, WHO_LATEST_DATA_FIELD_NAME_REPLACE, WHO_LATEST_DATA_FIELD_TYPE)
@@ -86,25 +95,93 @@ WHO_DAILY_REPORT_DATA = (
 WHO_VACCINATION_DATA = (URL_WHO_VACCINATION,
                         WHO_VACCINATION_PATH, WHO_VACCINATION_OUTPUT_FILE, WHO_VACCINATION_DATA_MYSQL_TABLE, WHO_VACCINATION_DATA_FIELD_NAME, WHO_VACCINATION_DATA_FIELD_TYPE)
 
+WB_GEOJSON_DATA = (GEOJSON_FILE_PATH, WB_GEOJSON_DATA_TABLE,
+                   WB_GEOJSON_DATA_FIELD_NAME, WB_GEOJSON_DATA_FIELD_TYPE)
 
-def geoJson_to_geodataframe(jsonFile_path=GEOJSON_FILE_PATH):
-    gdf = gpd.read_file(jsonFile_path)
-    # 将 GeoDataFrame 中的几何对象（geometry）转换成 Well-Known Text（WKT）格式，并将其存储在一个新的列 'wkt_geometry' 中
-    gdf = gdf[['ISO_A3', 'geometry']]
-    # gdf.plot()
-    # plt.show()
+
+def create_GeoJson_mysql_table(jsonFile_path=WB_GEOJSON_DATA):
+    field_type = zip(WB_GEOJSON_DATA[2],
+                     WB_GEOJSON_DATA[3])
+    table_schema = ','.join(['{} {}'.format(col_name, col_data_type)
+                             for col_name, col_data_type in field_type])
+    create_table_sql_text = text(
+        f"CREATE TABLE {jsonFile_path[1]} ({table_schema}) ENGINE={ENGINE} DEFAULT CHARSET={CHARSET}")
+    conn.execute(create_table_sql_text)
+    print(f"create table {jsonFile_path[1]} finished.")
+
+
+def import_GeoJson_data_to_mysql_data(jsonFile_path=WB_GEOJSON_DATA):
+    gdf = gpd.read_file(jsonFile_path[0])
+    gdf = gdf[jsonFile_path[2]]
+
+    gdf['geometry'] = gdf['geometry'].apply(
+        lambda x: x.wkt)
+
+    field_names = ','.join(jsonFile_path[2])
+    print(field_names)
+    for i, r in gdf.iterrows():
+        values = []
+        for value in r.values[0:-1]:
+            if isinstance(value, str):
+                values.append(f"\"{value}\"")
+            else:
+                values.append(str(value))
+        values.append(f"ST_GeomFromText(\"{r.values[-1]}\")")
+        values_str = ','.join(values)
+        conn.execute(text(
+            f"INSERT INTO {jsonFile_path[1]} ({field_names}) VALUES ({values_str})"))
+
+    print(f"Data in {jsonFile_path[1]} created successfully.")
+
+
+def geoJson_data_is_enough(jsonFile_path=WB_GEOJSON_DATA):
+    data_is_enough = conn.execute(
+        text(f"SELECT COUNT(*) FROM {jsonFile_path[1]}")).fetchone()[0]
+    return data_is_enough
+
+
+def update_mysql_geoJson(jsonFile_path=WB_GEOJSON_DATA):
+    conn.execute(text(f"USE {db_name[1]}"))
+
+    if not insp.has_table(jsonFile_path[1], db_name[1]):
+        create_GeoJson_mysql_table()
+        import_GeoJson_data_to_mysql_data()
+
+    data_is_enough = geoJson_data_is_enough(jsonFile_path)
+    if not bool(data_is_enough):
+        import_GeoJson_data_to_mysql_data()
+    elif data_is_enough < 251:
+        conn.execute(
+            text(f"TRUNCATE TABLE {jsonFile_path[1]}"))
+        import_GeoJson_data_to_mysql_data()
+    else:
+        print(
+            f"Data in {jsonFile_path[1]} is already OK. Don't need to do anything.")
+
+
+def get_geoJson_dataFrame(jsonFile_path=WB_GEOJSON_DATA):
+    update_mysql_geoJson(jsonFile_path)
+    field_name = jsonFile_path[2][0:-1]
+    field_name.append(f"ST_AsTEXT({jsonFile_path[2][-1]})")
+    field_names = ','.join(field_name)
+    # gdf = gpd.read_postgis(
+    #     f"SELECT {field_names} FROM {jsonFile_path[1]}", geo_engine, geom_col='geometry', crs='EPSG:4326')
+    sql = f"SELECT {field_names} FROM {jsonFile_path[1]}"
+    # gdf = conn.execute(text(sql)).fetchall()
+    # for chunk_dataframe in pd.read_sql(sql, geo_engine, chunksize=25):
+    #     print(f"Got dataframe w/{len(chunk_dataframe)} rows")
+    # for df in df_iter:
+    #     print(df)
+
+    df = pd.read_sql(sql, geo_engine)
+    df['ST_AsTEXT(geometry)'] = df['ST_AsTEXT(geometry)'].apply(wkt.loads)
+    gdf = gpd.GeoDataFrame(df, geometry='ST_AsTEXT(geometry)', crs=4326)
     return gdf
 
 
-def data_update_time_setting(latestFile=WHO_LATEST_DATA, dailyReportFile=WHO_DAILY_REPORT_DATA, vaccinationFile=WHO_VACCINATION_DATA):
-    # time detection
-    handle_file_latest = win32file.CreateFile(latestFile[1], win32con.GENERIC_READ,
-                                              win32con.FILE_SHARE_READ, None, win32con.OPEN_EXISTING, 0, None)
-    handle_file_daily_report = win32file.CreateFile(dailyReportFile[1], win32con.GENERIC_READ,
-                                                    win32con.FILE_SHARE_READ, None, win32con.OPEN_EXISTING, 0, None)
-    handle_file_vaccination = win32file.CreateFile(vaccinationFile[1], win32con.GENERIC_READ,
-                                                   win32con.FILE_SHARE_READ, None, win32con.OPEN_EXISTING, 0, None)
-
+def data_update_time_setting(who_covid19_file):
+    handle_file = win32file.CreateFile(who_covid19_file[1], win32con.GENERIC_READ,
+                                       win32con.FILE_SHARE_READ, None, win32con.OPEN_EXISTING, 0, None)
     '''
     for file in os.listdir(path):
         file_path = os.path.join(path, file)
@@ -112,28 +189,15 @@ def data_update_time_setting(latestFile=WHO_LATEST_DATA, dailyReportFile=WHO_DAI
         print(f"{file}: {created_time}")
     '''
     # last modified time
-    handle_file_time_latest = win32file.GetFileTime(handle_file_latest)[2]
-    handle_file_time_daily_report = win32file.GetFileTime(
-        handle_file_daily_report)[2]
-    handle_file_time_vaccination = win32file.GetFileTime(
-        handle_file_vaccination)[2]
 
-    win32file.CloseHandle(handle_file_latest)
-    win32file.CloseHandle(handle_file_daily_report)
-    win32file.CloseHandle(handle_file_vaccination)
-
+    handle_file_time = win32file.GetFileTime(handle_file)[2]
+    win32file.CloseHandle(handle_file)
     handle_file_time_latest = datetime.fromtimestamp(
-        pywintypes.Time(handle_file_time_latest).timestamp())
-    handle_file_time_daily_report = datetime.fromtimestamp(
-        pywintypes.Time(handle_file_time_daily_report).timestamp())
-    handle_file_time_vaccination = datetime.fromtimestamp(
-        pywintypes.Time(handle_file_time_vaccination).timestamp())
+        pywintypes.Time(handle_file_time).timestamp())
     now_time = datetime.fromtimestamp(
         pywintypes.Time(datetime.now()).timestamp())
-    diff_latest = now_time - handle_file_time_latest
-    diff_daily_report = now_time - handle_file_time_daily_report
-    diff_vaccination = now_time - handle_file_time_vaccination
-    return diff_latest, diff_daily_report, diff_vaccination
+    diff_handle_file_time = now_time - handle_file_time_latest
+    return diff_handle_file_time
 
 
 def get_WHO_data(url):
@@ -165,111 +229,78 @@ def save_csv_file(output_file, func, url):
             writer.writerow(row)
 
 
-# def update_mysql_table(dataFile):
-#     global cnx
-#     try:
-#         cursor = cnx.cursor()
-#         cursor.execute(f"CREATE DATABASE IF NOT EXISTS {db_name}")
-#         cursor.execute(f"USE {db_name}")
-#         table_schema = ','.join(['{} {}'.format(col_name, col_data_type)
-#                                  for col_name, col_data_type in zip(dataFile[4], dataFile[5])])
-#         cursor.execute(
-#             f"CREATE TABLE IF NOT EXISTS {dataFile[3]} ({table_schema})")
-#         data_reader = pd.read_csv(
-#             dataFile[1], quotechar='"', delimiter=',', header=0)
-#         data_reader.fillna(value='NULL', inplace=True)
-#         data_reader.columns = map(str.lower, data_reader.columns)
-#         field_types = dict(zip(dataFile[4], dataFile[5]))
-#         with engine.begin() as connection:
-#             data_reader.to_sql(
-#                 name=dataFile[3], con=connection, if_exists='replace', dtype=field_types)
-#         cnx.commit()
-#         print("Data inserted successfully.")
-#         cursor.close()
-#     except mysql.connector.Error as err:
-#         print(f"Error: {err}")
-#         cursor.close()
-#     except Exception as e:
-#         print(e)
-#         print(data_reader.loc[data_reader.isnull().any(axis=1)])
-
-
 def create_mysql_table(dataFile):
     field_types = zip(dataFile[4], dataFile[5])
 
     # according to position you want insert to, you need to change position of ','
     # primary_key = ', ID INT AUTO_INCREMENT PRIMARY KEY'
-    ENGINE = 'InnoDB'
-    CHARSET = 'utf8mb4'
 
-    # table_schema = ','.join(['{} {}'.format(col_name, col_data_type)
-    #                                        for col_name, col_data_type in field_types]) + primary_key
-    # sql_creat_table = f"CREATE TABLE {dataFile[3]} ({table_schema}) ENGINE={ENGINE} DEFAULT CHARSET={CHARSET};"
-    # connection.execute(f"DROP TABLE IF EXISTS {dataFile[3]}")
-    # connection.execute(sql_creat_table)
-
-    metadata = MetaData(bind=engine)
+    mysql_metadata = MetaData(bind=engine)
     Table(dataFile[3],
-          metadata,
-          *[
-        Column(col_name, col_data_type, nullable=False)
-        for col_name, col_data_type in field_types
-    ],
-        #   Column('ID', Integer, primary_key=True, autoincrement=True),
-        mysql_engine=ENGINE,
-        mysql_charset=CHARSET
-    )
-    metadata.create_all(engine)
+          mysql_metadata,
+          *[Column(col_name, col_data_type, nullable=False)
+            for col_name, col_data_type in field_types],
+          mysql_engine=ENGINE,
+          mysql_charset=CHARSET
+          )
+
+    mysql_metadata.create_all(engine)
+
     print(f"{dataFile[3]} created successfully.")
 
 
 def import_data_to_table(dataFile):
-    table_has_data = False
-    table_has_data = bool(engine.execute(
-        f"SELECT EXISTS(SELECT 1 FROM {dataFile[3]} LIMIT 1)").scalar())
-    if not table_has_data:
-        # Read CSV data
-        data_reader = pd.read_csv(
-            dataFile[1], quotechar='"', delimiter=',', header=0)
-        data_reader.fillna(value='NULL', inplace=True)
-        data_reader.columns = map(str.lower, data_reader.columns)
+    # Read CSV data
+    data_reader = pd.read_csv(
+        dataFile[1], quotechar='"', delimiter=',', header=0)
+    data_reader.fillna(value='NULL', inplace=True)
+    data_reader.columns = map(str.lower, data_reader.columns)
+    if dataFile[3] == WHO_LATEST_DATA_MYSQL_TABLE:
+        data_reader.columns = dataFile[4]
+    data_reader.to_sql(
+        name=dataFile[3], con=engine, if_exists='replace', index=False, schema=db_name[0])
 
-        data_reader.to_sql(
-            name=dataFile[3], con=engine, if_exists='replace', index=True)
-        # engine.execute(
-        #     f"ALTER TABLE {dataFile[3]} ADD {primary_key} FIRST;")
-        print(f"Data in {dataFile[3]} created successfully.")
-    else:
-        print("Initializated database.")
+    # engine.execute(
+    #     f"ALTER TABLE {dataFile[3]} ADD {primary_key} FIRST;")
+    print(f"Data in {dataFile[3]} created successfully.")
+
+
+def table_has_enough_data(dataFile):
+    table_has_data = conn.execute(
+        text(f"SELECT COUNT(*) FROM {dataFile[3]}")).fetchone()[0]
+    return table_has_data
 
 
 def init_mysql_table(dataFile):
     # Check if the table exists and has data
-    insp = inspect(engine)
-    table_exists = dataFile[3] in insp.get_table_names()
+    table_exists = bool(conn.execute(text('SHOW TABLES')).fetchall())
 
-    # Create table if it doesn't exist or has no data
-    if not table_exists:
+    if not table_exists or not insp.has_table(dataFile[3], db_name[0]):
         create_mysql_table(dataFile)
         import_data_to_table(dataFile)
         return True
     else:
-        import_data_to_table(dataFile)
+        # Create table if it doesn't exist or has no data
+        table_has_data = table_has_enough_data(dataFile)
+        if table_has_data < 229:
+            import_data_to_table(dataFile)
+            return True
+        print("Initializated database.")
         return False
 
 
 def update_mysql_table(dataFile):
     if not init_mysql_table(dataFile):
-        # Get latest date from the table
-        with engine.begin() as connection:
-            latest_date_str = connection.execute(
-                f"SELECT MAX({dataFile[4][0]}) FROM {dataFile[3]}").scalar()
-        latest_date = datetime.strptime(latest_date_str, '%Y-%m-%d')
-        # Compare latest date with current date
-        days_diff = (datetime.today() - latest_date).days
-
         # Update table if latest data is older than 7 days
-        if dataFile[3] == 'who_covid_19_daily_report_data_table':
+        if dataFile[3] == WHO_DAILY_REPORT_DATA_MYSQL_TABLE:
+            # Get latest date from the table
+            with engine.begin() as connection:
+                latest_date_str = connection.execute(text(
+                    f"SELECT MAX({dataFile[4][0]}) FROM {dataFile[3]}")).fetchall()
+                print(latest_date_str)
+            latest_date = datetime.strptime(latest_date_str, '%Y-%m-%d')
+            # Compare latest date with current date
+            days_diff = (datetime.today() - latest_date).days
             if days_diff >= 7:
                 data_reader = pd.read_csv(
                     dataFile[1], quotechar='"', delimiter=',', header=0)
@@ -283,7 +314,7 @@ def update_mysql_table(dataFile):
 
                 if updated_data.empty:
                     print(
-                        f"Data in {dataFile[3]} is up to date. Don't need to do anything.")
+                        f"Data in {dataFile[3]} is correspond to source data. Don't need to do anything.")
                     return
                 with engine.begin() as connection:
                     updated_data.to_sql(
@@ -293,74 +324,75 @@ def update_mysql_table(dataFile):
                 print(
                     f"Data in {dataFile[3]} is up to date. Don't need to do anything.")
         else:
-            if days_diff >= 1:
-                data_reader = pd.read_csv(
-                    dataFile[1], quotechar='"', delimiter=',', header=0)
-                data_reader.fillna(value='NULL', inplace=True)
-                data_reader.columns = map(str.lower, data_reader.columns)
-
-                # because that latest and vaccination is not lot of data and frequently updated
-                with engine.begin() as connection:
-                    updated_data.to_sql(
-                        name=dataFile[3], con=connection, if_exists='replace', index=True)
-                print(f"Data in {dataFile[3]} updated successfully.")
-            else:
-                print(
-                    f"Data in {dataFile[3]} is up to date. Don't need to do anything.")
-
-
-def update_who_data_file(latestFile=WHO_LATEST_DATA, dailyReportFile=WHO_DAILY_REPORT_DATA, vaccinationFile=WHO_VACCINATION_DATA):
-    latest_file_path = os.path.join(latestFile[1])
-    daly_report_file_path = os.path.join(dailyReportFile[1])
-    vaccination_file_path = os.path.join(vaccinationFile[1])
-    if os.path.isfile(latest_file_path) and os.path.isfile(daly_report_file_path) and os.path.isfile(vaccination_file_path):
-        diff_latest, diff_daily_report, diff_vaccination = data_update_time_setting()
-        if diff_latest > timedelta(hours=180):
-            print('latest:', diff_latest)
-            save_csv_file(latestFile[2], get_WHO_data, url=latestFile[0])
-            update_mysql_table(update_mysql_table)
-        elif diff_vaccination > timedelta(hours=18):
-            print('vaccination:', diff_vaccination)
-            save_csv_file(vaccinationFile[2],
-                          get_WHO_data, url=vaccinationFile[0])
-            update_mysql_table(vaccinationFile)
-        elif diff_daily_report > timedelta(days=4):
-            print('daily report:', diff_daily_report)
-            save_csv_file(dailyReportFile[2], get_WHO_data,
-                          url=dailyReportFile[0])
-            update_mysql_table(dailyReportFile)
-        else:
-            print('latest:', diff_latest)
-            print('daily report:', diff_daily_report)
-            print('vaccination:', diff_vaccination)
+            import_data_to_table(dataFile)
+            print(f"Data in {dataFile[3]} updated successfully.")
 
     else:
-        save_csv_file(latestFile[2], get_WHO_data, url=latestFile[0])
-        update_mysql_table(update_mysql_table)
-        save_csv_file(dailyReportFile[2], get_WHO_data,
-                      url=dailyReportFile[0])
-        update_mysql_table(dailyReportFile)
-        save_csv_file(vaccinationFile[2],
-                      get_WHO_data, url=vaccinationFile[0])
-        update_mysql_table(vaccinationFile)
+        print(
+            f"Data in {dataFile[3]} is created and already up to date. Don't need to do anything.\n***if table doesn't exists, it will created table***")
 
 
-def df_gdf_merged_data(data_latest, data_vaccination, data_geojson):
-    merged_data = pd.merge(data_latest, data_vaccination,
-                           left_on='Country_Or_Region', right_on='COUNTRY')
-    merged_data = pd.merge(merged_data, data_geojson,
-                           left_on='ISO3', right_on='ISO_A3')
-    merged_data = gpd.GeoDataFrame(merged_data)
-    return merged_data
+def get_who_covid19_dataframe(who_covid19_file):
+    field_names = ','.join(who_covid19_file[4])
+    sql = f"SELECT {field_names} from {who_covid19_file[3]}"
+    df = pd.read_sql(sql, engine)
+    return df
+
+
+def init_all_default_who_covid19_data(latestFile=WHO_LATEST_DATA, dailyReportFile=WHO_DAILY_REPORT_DATA, vaccinationFile=WHO_VACCINATION_DATA):
+    save_csv_file(latestFile[2], get_WHO_data, url=latestFile[0])
+    update_mysql_table(latestFile)
+    save_csv_file(dailyReportFile[2], get_WHO_data,
+                  url=dailyReportFile[0])
+    update_mysql_table(dailyReportFile)
+    save_csv_file(vaccinationFile[2],
+                  get_WHO_data, url=vaccinationFile[0])
+    update_mysql_table(vaccinationFile)
+
+
+def update_who_data_file(who_covid19_file):
+    who_covid19_file_path = os.path.join(who_covid19_file[1])
+    if os.path.isfile(who_covid19_file_path):
+        diff_file_time = data_update_time_setting(who_covid19_file)
+        if who_covid19_file == WHO_LATEST_DATA or who_covid19_file == WHO_VACCINATION_DATA:
+            if diff_file_time > timedelta(hours=16):
+                print(f"{who_covid19_file[2]}: ", diff_file_time)
+                save_csv_file(
+                    who_covid19_file[2], get_WHO_data, url=who_covid19_file[0])
+                update_mysql_table(who_covid19_file)
+            else:
+                print(
+                    f"Curr diff timing not enough to update-----> {who_covid19_file[2]}: ", diff_file_time)
+        else:
+            if diff_file_time > timedelta(days=4):
+                print(f"{who_covid19_file[2]}: ", diff_file_time)
+                save_csv_file(
+                    who_covid19_file[2], get_WHO_data, url=who_covid19_file[0])
+                update_mysql_table(who_covid19_file)
+            else:
+                print(
+                    f"Curr diff timing not enough to update-----> {who_covid19_file[2]}: ", diff_file_time)
+    else:
+        init_all_default_who_covid19_data()
 
 
 if __name__ == '__main__':
     latestFile = WHO_LATEST_DATA
     dailyReportFile = WHO_DAILY_REPORT_DATA
     vaccinationFile = WHO_VACCINATION_DATA
-    update_who_data_file(latestFile, dailyReportFile, vaccinationFile)
+    update_who_data_file(latestFile)
+    update_who_data_file(dailyReportFile)
+    update_who_data_file(vaccinationFile)
+    gdf = get_geoJson_dataFrame()
+    df_latest = get_who_covid19_dataframe(latestFile)
+    df_daily_report = get_who_covid19_dataframe(dailyReportFile)
+    df_vaccination = get_who_covid19_dataframe(vaccinationFile)
+    df_lat_vac = pd.merge(df_latest, df_vaccination,
+                          left_on='Country_Or_Region', right_on='COUNTRY')
+    # gdf_ = gpd.GeoDataFrame(pd.merge(gdf,df_latest,left_on='FORMAL_EN',right_on='Country_Or_Region'),geometry='ST_AsTEXT(geometry)')
+    gdf.plot(scheme='quantiles', legend=True, cmap='YlOrRd')
+    plt.show()
 
-# close connection
-# cnx.close()
 
 engine.dispose()
+geo_engine.dispose()
