@@ -12,7 +12,7 @@ import win32con
 import os
 import pywintypes
 import matplotlib.pyplot as plt
-import mysql.connector
+import numpy as np
 from sqlalchemy import create_engine, MetaData, inspect, text, Integer, DATE, DECIMAL, VARCHAR, CHAR, MetaData, Table, Column
 # used database name
 db_name = ['WHO_COVID19_DATASET',
@@ -83,7 +83,7 @@ WHO_VACCINATION_DATA_FIELD_NAME = ['COUNTRY', 'ISO3', 'WHO_REGION', 'DATA_SOURCE
 WHO_VACCINATION_DATA_FIELD_TYPE = [VARCHAR(64), CHAR(3), CHAR(4), VARCHAR(16), DATE(), Integer(), DECIMAL(), Integer(), DECIMAL(), Integer(), DECIMAL(), VARCHAR(64),
                                    DATE(), Integer(), Integer(), DECIMAL()]
 
-WB_GEOJSON_DATA_FIELD_NAME = ['FID', 'OBJECTID', 'FORMAL_EN', 'ISO_A2', 'ISO_A3', 'WB_A2', 'WB_A3', 'CONTINENT', 'REGION_UN', 'SUBREGION', 'REGION_WB', 'NAME_DE', 'NAME_EN', 'WB_NAME',
+WB_GEOJSON_DATA_FIELD_NAME = ['FID', 'OBJECTID', 'FORMAL_EN', 'ISO_A2', 'ISO_A3_EH', 'WB_A2', 'WB_A3', 'CONTINENT', 'REGION_UN', 'SUBREGION', 'REGION_WB', 'NAME_DE', 'NAME_EN', 'WB_NAME',
                               'WB_REGION', 'Shape_Leng', 'Shape_Area', 'geometry']
 WB_GEOJSON_DATA_FIELD_TYPE = ['INT', 'INT', 'VARCHAR(64)', 'CHAR(3)', 'CHAR(4)', 'CHAR(3)', 'CHAR(4)', 'VARCHAR(64)', 'VARCHAR(64)',
                               'VARCHAR(64)', 'VARCHAR(64)', 'VARCHAR(64)', 'VARCHAR(64)', 'VARCHAR(64)', 'VARCHAR(16)', 'DOUBLE', 'DOUBLE', 'GEOMETRY']
@@ -113,7 +113,8 @@ def create_GeoJson_mysql_table(jsonFile_path=WB_GEOJSON_DATA):
 def import_GeoJson_data_to_mysql_data(jsonFile_path=WB_GEOJSON_DATA):
     gdf = gpd.read_file(jsonFile_path[0])
     gdf = gdf[jsonFile_path[2]]
-
+    gdf['ISO_A3_EH'] = np.where(
+        gdf['ISO_A3_EH'] == '-99', gdf['WB_A3'], gdf['ISO_A3_EH'])
     gdf['geometry'] = gdf['geometry'].apply(
         lambda x: x.wkt)
 
@@ -164,18 +165,21 @@ def get_geoJson_dataFrame(jsonFile_path=WB_GEOJSON_DATA):
     field_name = jsonFile_path[2][0:-1]
     field_name.append(f"ST_AsTEXT({jsonFile_path[2][-1]})")
     field_names = ','.join(field_name)
+
+    tmp_field_names = f"FORMAL_EN, ISO_A2, ISO_A3_EH, WB_A3, ST_AsTEXT(geometry)"
     # gdf = gpd.read_postgis(
     #     f"SELECT {field_names} FROM {jsonFile_path[1]}", geo_engine, geom_col='geometry', crs='EPSG:4326')
-    sql = f"SELECT {field_names} FROM {jsonFile_path[1]}"
+    sql = f"SELECT {tmp_field_names} FROM {jsonFile_path[1]}"
     # gdf = conn.execute(text(sql)).fetchall()
     # for chunk_dataframe in pd.read_sql(sql, geo_engine, chunksize=25):
     #     print(f"Got dataframe w/{len(chunk_dataframe)} rows")
     # for df in df_iter:
     #     print(df)
 
-    df = pd.read_sql(sql, geo_engine)
-    df['ST_AsTEXT(geometry)'] = df['ST_AsTEXT(geometry)'].apply(wkt.loads)
-    gdf = gpd.GeoDataFrame(df, geometry='ST_AsTEXT(geometry)', crs=4326)
+    gdf = pd.read_sql(sql, geo_engine)
+    gdf['ST_AsTEXT(geometry)'] = gdf['ST_AsTEXT(geometry)'].apply(wkt.loads)
+    gdf.rename(columns={'ST_AsTEXT(geometry)': 'geometry'}, inplace=True)
+    gdf = gpd.GeoDataFrame(gdf, geometry='geometry', crs=4326)
     return gdf
 
 
@@ -252,7 +256,7 @@ def create_mysql_table(dataFile):
 def import_data_to_table(dataFile):
     # Read CSV data
     data_reader = pd.read_csv(
-        dataFile[1], quotechar='"', delimiter=',', header=0)
+        dataFile[1], quotechar='"', delimiter=',', header=0, index_col=False)
     data_reader.fillna(value='NULL', inplace=True)
     data_reader.columns = map(str.lower, data_reader.columns)
     if dataFile[3] == WHO_LATEST_DATA_MYSQL_TABLE:
@@ -266,6 +270,7 @@ def import_data_to_table(dataFile):
 
 
 def table_has_enough_data(dataFile):
+    conn.execute(text(f"USE {db_name[0]}"))
     table_has_data = conn.execute(
         text(f"SELECT COUNT(*) FROM {dataFile[3]}")).fetchone()[0]
     return table_has_data
@@ -279,17 +284,17 @@ def init_mysql_table(dataFile):
         create_mysql_table(dataFile)
         import_data_to_table(dataFile)
         return True
+    # Create table if it doesn't exist or has no data
+    elif table_has_enough_data(dataFile) < 229:
+        import_data_to_table(dataFile)
+        return True
     else:
-        # Create table if it doesn't exist or has no data
-        table_has_data = table_has_enough_data(dataFile)
-        if table_has_data < 229:
-            import_data_to_table(dataFile)
-            return True
-        print("Initializated database.")
+        print("Initializated database, check whether this table need to update.")
         return False
 
 
 def update_mysql_table(dataFile):
+    print(f"Current table is {dataFile[3]}")
     if not init_mysql_table(dataFile):
         # Update table if latest data is older than 7 days
         if dataFile[3] == WHO_DAILY_REPORT_DATA_MYSQL_TABLE:
@@ -333,6 +338,9 @@ def update_mysql_table(dataFile):
 
 
 def get_who_covid19_dataframe(who_covid19_file):
+    # !!!
+    # To debug unknown data problems (including the API itself)
+    # update_mysql_table(who_covid19_file)
     field_names = ','.join(who_covid19_file[4])
     sql = f"SELECT {field_names} from {who_covid19_file[3]}"
     df = pd.read_sql(sql, engine)
@@ -385,12 +393,27 @@ if __name__ == '__main__':
     update_who_data_file(vaccinationFile)
     gdf = get_geoJson_dataFrame()
     df_latest = get_who_covid19_dataframe(latestFile)
-    df_daily_report = get_who_covid19_dataframe(dailyReportFile)
+    # df_daily_report = get_who_covid19_dataframe(dailyReportFile)
     df_vaccination = get_who_covid19_dataframe(vaccinationFile)
-    df_lat_vac = pd.merge(df_latest, df_vaccination,
-                          left_on='Country_Or_Region', right_on='COUNTRY')
-    # gdf_ = gpd.GeoDataFrame(pd.merge(gdf,df_latest,left_on='FORMAL_EN',right_on='Country_Or_Region'),geometry='ST_AsTEXT(geometry)')
-    gdf.plot(scheme='quantiles', legend=True, cmap='YlOrRd')
+
+    # Abnormal data processing
+    df_latest['Country_Or_Region'] = df_latest['Country_Or_Region'].replace(
+        'Türkiye', 'Turkey')
+
+    df_lat_vacc = pd.merge(df_latest, df_vaccination,
+                           left_on='Country_Or_Region', right_on='COUNTRY')
+    df_lat_vacc['ISO3'].to_csv('one.csv')
+    CURR_GDF = gpd.GeoDataFrame(pd.merge(gdf, df_lat_vacc, left_on='ISO_A3_EH',
+                                         right_on='ISO3'), geometry='geometry')
+    CURR_GDF['ISO_A3_EH'].to_csv('two.csv')
+    CURR_GDF.plot(column='Cases', legend=True, cmap='YlOrRd')
+
+    # save geodataframe as shpfile
+    CURR_GDF.to_file('output', encoding='utf-8')
+
+    # boundary
+    # gdf['ST_AsTEXT(geometry)'].boundary.plot()
+
     plt.show()
 
 
