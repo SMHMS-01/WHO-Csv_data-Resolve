@@ -5,13 +5,13 @@ import gzip
 from urllib import request, error
 import http
 import csv
-import chardet
 import pandas as pd
 import geopandas as gpd
 from shapely import wkt
 import os
 from win32 import win32file
-from win32.lib import win32con, pywintypes
+from win32.lib import win32con
+import pywintypes
 import matplotlib.pyplot as plt
 import numpy as np
 from sqlalchemy import create_engine, MetaData, inspect, text, Integer, DATE, DECIMAL, VARCHAR, CHAR, MetaData, Table, Column
@@ -216,7 +216,7 @@ def get_geoDataFrame(jsonFile_path):
 
     tmp_field_names = f"FORMAL_EN, ISO_A2, ISO_A3_EH, WB_A3, ST_AsTEXT(geometry)"
 
-    sql = f"SELECT {tmp_field_names} FROM {jsonFile_path[1]}"
+    sql = text(f"SELECT {tmp_field_names} FROM {jsonFile_path[1]}")
 
     # gdf = conn.execute(text(sql)).fetchall()
     # for chunk_dataframe in pd.read_sql(sql, geo_engine, chunksize=25):
@@ -224,7 +224,7 @@ def get_geoDataFrame(jsonFile_path):
     # for df in df_iter:
     #     print(df)
 
-    gdf = pd.read_sql(sql, geo_engine)
+    gdf = pd.read_sql(sql=sql, con=geo_engine.connect())
     gdf['ST_AsTEXT(geometry)'] = gdf['ST_AsTEXT(geometry)'].apply(wkt.loads)
     gdf.rename(columns={'ST_AsTEXT(geometry)': 'geometry'}, inplace=True)
     gdf = gpd.GeoDataFrame(gdf, geometry='geometry', crs=4326)
@@ -394,8 +394,8 @@ def get_who_covid19_dataframe(who_covid19_file):
     # update_mysql_table(who_covid19_file)
 
     field_names = ','.join(who_covid19_file[4])
-    sql = f"SELECT {field_names} from {who_covid19_file[3]}"
-    df = pd.read_sql(sql, engine)
+    sql = text(f"SELECT {field_names} from {who_covid19_file[3]}")
+    df = pd.read_sql(sql, engine.connect())
     return df
 
 
@@ -465,7 +465,7 @@ if __name__ == '__main__':
     CURR_GDF.plot(column='Cases', legend=True, cmap='YlOrRd')
 
     # save geodataframe as shpfile
-    # CURR_GDF.to_file('output', encoding='utf-8')
+    CURR_GDF.to_file('output', encoding='utf-8')
 
     plt.show()
 
